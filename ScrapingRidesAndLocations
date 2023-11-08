@@ -1,0 +1,596 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Jan 28 14:19:29 2021
+
+@author: Hermy
+"""
+
+# -*- coding: utf-8 -*-
+"""
+
+1- Log in to Platform, using Gmail
+2- Get a Bearer token from the authentication platform
+3- Scrape away! First we scrape Rides data and push to our MySQL Cloud, run an SQL transformation script, then we scrape Vehicle data and do the same.
+4- Scrape UAH Currency from the Web
+5- Log in and Scrape Rides Locations from the platform
+
+#NOTE FOR THE READER! -> All of the private information is Hidden with: --------------.
+
+"""
+#import necessary packages.
+import os
+import json
+import pandas as pd
+import requests
+import numpy as np
+import math
+import time
+
+from requests import Session
+from sqlalchemy import create_engine
+from sqlite3 import OperationalError
+from lxml.html import fromstring
+from datetime import datetime, timedelta
+
+'''Set current directory'''
+
+os.chdir('------\Python_Auto')
+
+'''Set login & MySQL connection engine'''
+ssl_args={'ssl_ca': '\SSL\client-key.pem'    #this is the client key for authentication against the server.
+    }
+
+#db_connection_str = connection+connectionpackage, username, password, location (for this to work the cloud proxy must be running)
+db_connection_str = '--------------------------------'                       
+engine = create_engine(db_connection_str, connect_args=ssl_args, echo=True, 
+                            pool_timeout=60, pool_pre_ping=True, pool_size=10, max_overflow=5, encoding="utf8")
+
+#These two empty strings create failovers - if the cookies we have stored are old,
+#the program will automatically get new cookies by logging in
+#These empty strings are unfortunately stupidly important.
+#don't remove these.
+take_cookies = ''
+c=''
+
+def executeScriptsFromFile(filename):
+    # Open and read the file as a single buffer
+    fd = open(filename, 'r')
+    sqlFile = fd.read()
+    fd.close()
+
+    # all SQL commands (split on ';')
+    sqlCommands = sqlFile.split(';')
+
+    # Execute every command from the input file
+    for command in sqlCommands:
+        # This will skip and report errors
+        # For example, if the tables do not yet exist, this will skip over
+        # the DROP TABLE commands
+        try:
+            engine.connect().execute(command)
+        except OperationalError:
+            print ("Command skipped: ")
+
+class NoRebuildAuthSession(Session):
+    def rebuild_auth(self, prepared_request, response):
+        """
+        No code here means requests will always preserve the Authorization
+        header when redirected.
+        Be careful not to leak your credentials to untrusted hosts!
+        """
+        
+session = NoRebuildAuthSession()
+
+
+##Get bearer token first
+
+#if response like cloudflare access sign in, then  emailPart(), else continue
+try: #wrapping this whole thing in a "try", if it fails we get exception email.
+    complete = 0
+    while complete != 1:
+        with open('cookies.txt','r') as r_cookies_file:
+            cookies = r_cookies_file.read()
+            r_cookies_file.close()
+        URL_b= "https://--------------/getJwtForPartner"
+        headers_b = {
+            'authority':'--------------.co',
+            'method':'POST',
+            'path':'/--------------/getJwtForPartner',
+            'scheme':'https',
+            'accept':'application/json, text/plain, */*',
+            'accept-encoding':'gzip, deflate, br',
+            'accept-language':'en-AU,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
+            'content-length':'53',
+            'content-type':'application/json',
+            'cookie':cookies,
+            'origin':'https://--------------.co',
+            'referer':'https://--------------.co/*&*&*/rides',
+            'sec-fetch-dest':'empty',
+            'sec-fetch-mode':'cors',
+            'sec-fetch-site':'same-origin',
+            'user-agent':'Chrome/83.0.4103.106'
+            }
+        payload_b = {'partner_id':"--------------"}
+        
+        response = session.post(URL_b, headers=headers_b, json = payload_b)
+        tree = fromstring(response.text)
+        SYSMSG = (response.text)[0:15]
+        print(SYSMSG)
+        if response.text.find('token') != -1:
+            SYSMSG =('SYSMSG - Successful login!')
+            complete = 1
+            break       
+        else:
+            SYSMSG =('SYSMSG - Unsuccessful Login - restart with the login stuff')
+            print(SYSMSG)
+            raise Exception('Login Failed')
+    
+    bearer = response.content.decode('utf-8')
+    
+    bearer = bearer[10: len(bearer)-2]
+    bearer = 'Bearer '+bearer
+    
+    #print(bearer)   
+    
+    url = "https://--------------/getRides"
+    
+    headers = {
+        'authority':'--------------.co',
+        'method':'POST',
+        'path':'/--------------/getRides',
+        'scheme':'https',
+        'accept':'application/json, text/plain, */*',
+        'accept-encoding':'gzip, deflate, br',
+        'accept-language':'en-US,en;q=0.9',
+        'authorization': bearer,    
+        'content-length':'88',
+        'content-type':'application/json',
+        'Cookie':cookies,
+        'content-type':'application/json',
+        'origin':'https://--------------',
+        'referer':'https://--------------/*&*&*/rides',
+        'sec-fetch-dest':'empty',
+        'sec-fetch-mode':'cors',
+        'sec-fetch-site':'same-origin',
+        'user-agent':'Chrome/84.0.4147.125'
+        }
+    
+    SYSMSG =('SYSMSG - begin Rides Data loop')
+    loop = 1
+    return_text_rides= [] 
+    i = 0
+    lim= 2000
+    while i < (lim*1):
+        body = {"offset":str(i),
+                'limit': lim,
+                'order':'started_at-desc'}
+        payload = {'body':body}
+        SYSMSG =('SYSMSG - beginning loop '+str(loop)+'...')
+        print(SYSMSG)
+        #Send post without manually verifying
+        response_rides = session.post(url, headers=headers, json = payload)
+        resp_text_rides = json.loads(response_rides.text)
+        return_text_rides.extend(resp_text_rides.get("items"))
+        loop = loop+1
+        i = i + lim
+    SYSMSG =('SYSMSG - Rides Data loop Complete')
+    print(SYSMSG)
+    SYSMSG =('SYSMSG - Begin Rides data frame fixes')
+    print(SYSMSG)
+    df_rides = pd.DataFrame(return_text_rides)
+    #df_rides.head()
+    #df_rides.dtypes
+    #df_rides['issues']
+    
+    df_rides.rename(columns={'id':'ride_id'}, inplace=True)
+    df_rides = pd.concat([df_rides.drop(['rating'], axis=1), df_rides['rating'].apply(pd.Series)], axis=1)
+    df_rides = df_rides.drop([0,'created_at','id'], axis=1)
+    try:
+        df_rides = pd.concat([df_rides.drop('issues', axis=1),df_rides['issues'].apply(pd.Series)], axis=1) 
+        df_rides = pd.concat([df_rides.drop([0], axis=1),df_rides[0].apply(pd.Series)], axis=1) 
+        df_rides = df_rides.drop([0,'created_at','id'], axis=1)
+    except:
+        df_rides['issues']=""
+    cols = df_rides.columns.tolist()
+    j=0
+    for i in range(len(cols)):
+        #print(i)
+        if isinstance(cols[i],int)==True:
+            #print(i)
+            j=i
+            for j in range(j,len(cols)-1):
+                if isinstance(cols[i],int)==False:
+                    break
+                df_rides = pd.concat([df_rides.drop(df_rides.columns[i], axis=1),df_rides[(df_rides.columns[i])].apply(pd.Series)], axis=1) 
+                df_rides = df_rides.drop([0,'created_at','id'], axis=1)
+                j=j+1
+                #print('j= '+str(j))
+                #print('i= '+str(i))
+        if j>i:
+            df_rides['issue'] = df_rides['kind'].apply(lambda x: ', '.join(x.dropna()), axis=1)
+            df_rides = df_rides.drop(['kind'], axis=1)
+            break
+    if not 'issue' in df_rides.columns:
+        df_rides['issue']= np.nan
+    df_rides['feedback'] = df_rides['feedback'].str.encode('utf-8', 'ignore').str.decode('utf-8')
+    df_rides['ride_id'] = df_rides['ride_id'].str.encode('utf-8', 'ignore').str.decode('utf-8')
+    
+    SYSMSG =('SYSMSG - Rides data frame fixes complete')
+    print(SYSMSG)
+    
+    
+    con=engine.connect()    
+    
+    SYSMSG =('SYSMSG - Begin upload of Rides data')
+    print(SYSMSG)
+    df_rides.to_sql('RD_TMP_HSTRY_V2', engine, if_exists = 'replace', chunksize = 2000, index = False)
+    executeScriptsFromFile('[001]_MYSQL_-_UPDATE_RIDES_V2.sql')
+    SYSMSG =('SYSMSG - Rides data complete!')
+    print(SYSMSG)
+    
+    engine.dispose()
+    SYSMSG = ('SYSMSG - Script Completed Successfully! Time for a beer')
+    print(SYSMSG)
+except Exception:
+    
+    from smtplib import SMTP
+    
+    host="--------------.gmail.com"
+    port= 587
+    
+    username= "--------------.com"
+    password= "------------"
+    
+    from_email= username
+    to_list= ["--------------.eco", "---------------.eco""]
+    
+    CON= SMTP(host, port)
+    CON.ehlo()
+    CON.starttls()
+    CON.login(username, password)
+    CON.sendmail(from_email, to_list, "Rides Help! I've fallen over! My dying words are... "+str(SYSMSG)+" ...now please revive me. Sincerely, The Server")
+    CON.quit()
+    print('uh oh, Im broken! Call a wahhhmbulance!')
+    session.close()
+    engine.dispose()
+    
+#   NewCode Getting the Currencies
+try:
+    SYSMSG =('SYSMSG - Scraping Currency Data From the Web')
+    print(SYSMSG)
+            
+    #80669ee8184528c71116   - old
+    #4096c16c6695e59fc009   - new
+    Currency_get = requests.get("https://--------------/api/v7/convert?q=UAH_GEL&compact=--------------")
+   
+    Curr_js = json.dumps(Currency_get.json(), sort_keys=True, indent=4)
+    NewDat_js = pd.json_normalize(json.loads(Curr_js))
+    newResult = NewDat_js.iloc[0]['UAH_GEL']
+    
+    if newResult > 0:
+        SYSMSG =('SYSMSG - UAH - GEL Currency Taken')
+    
+    else:
+        SYSMSG =('SYSMSG - Currency Not Taken')
+            
+    print(SYSMSG)
+    
+    #Creating Currency_tmp Dataframe
+    Currency_tmp = pd.DataFrame(columns=['dateT_Currency_ST',
+                                         'dateT_Currency_End',
+                                         'From_Cur',
+                                         'To_Cur',
+                                         'Value'])
+    
+    #Making Sure that time imported is either full hour or half past
+    MINUTES = 10.
+    
+    now = datetime.now()
+    t = time.mktime(now.timetuple())
+    t = math.floor((t // 60) / MINUTES) * 600
+    now = datetime.fromtimestamp(t)
+    
+    #Taking away 2 hours from UAH Currencies and adding half an hour for second variable
+    now = now - timedelta(hours=2)
+    future = now + timedelta(hours=0.5)
+    
+    #Appending the Created Table to Already Created dataframe
+    Currency_tmp = Currency_tmp.append({'dateT_Currency_ST': now,
+                                        'dateT_Currency_End': future,
+                                        'From_Cur': "UAH",
+                                        'To_Cur': "GEL",
+                                        'Value': newResult}, ignore_index=True)
+     
+    con=engine.connect()    
+  
+    #Transforming the table into SQL Table
+    SYSMSG =('SYSMSG - Creating the Currency Table to SQL')
+    print(SYSMSG)
+    Currency_tmp.to_sql('CURRENCY_TMP', engine, if_exists = 'replace', chunksize = 2000, index = False)
+    executeScriptsFromFile('[G01]_MYSQL_-_UPDATE_CURRENCIES.sql')
+    SYSMSG =('SYSMSG - CURRENCY Table Transformed to SQL!')
+    print(SYSMSG)
+   
+    engine.dispose()    
+    
+except Exception:
+    
+    from smtplib import SMTP
+    
+    host="smtp.gmail.com"
+    port= 587
+    
+    username= "--------------@gmail.com"
+    password= "-------------"
+    
+    from_email= username
+    to_list= ["--------------.eco", "--------------.eco"]
+    
+    CON= SMTP(host, port)
+    CON.ehlo()
+    CON.starttls()
+    CON.login(username, password)
+    CON.sendmail(from_email, to_list, "Currency Value not Scraped")
+    CON.quit()
+    print('uh oh, Im broken! Call a wahhhmbulance!')
+# =============================================================================
+#     session.close()
+#     engine.dispose()
+# =============================================================================
+
+#Starting Locations Scraping Procedure
+
+#Executing RidesTransform Script!!!
+executeScriptsFromFile('[G02]_MYSQL_-_RIDES_TRANSFORM.sql')
+
+SYSMSG =('SYSMSG - Rides have been Transformed...')
+print(SYSMSG)
+
+SYSMSG =('SYSMSG - Now Scraping Locations...')
+print(SYSMSG)
+
+#Creating start time so that i see how long it takes to exeute
+start_time = time.time()
+        
+session = NoRebuildAuthSession()
+
+##Get bearer token first
+
+SYSMSG =('SYSMSG - Loging In...')
+print(SYSMSG)
+#if response like cloudflare access sign in, then  emailPart(), else continue
+#try: #wrapping this whole thing in a "try", if it fails we get exception email.
+complete = 0
+while complete != 1:
+    with open('cookies.txt','r') as r_cookies_file:
+        cookies = r_cookies_file.read()
+        r_cookies_file.close()
+    URL_b= "https://--------------/getJwtForPartner"
+    headers_b = {
+        'authority':'----------------.co',
+        'method':'POST',
+        'path':'/--------------/getJwtForPartner',
+        'scheme':'https',
+        'accept':'application/json, text/plain, */*',
+        'accept-encoding':'gzip, deflate, br',
+        'accept-language':'en-AU,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
+        'content-length':'53',
+        'content-type':'application/json',
+        'cookie':cookies,
+        'origin':'--------------',
+        'referer':'--------------/rides',
+        'sec-fetch-dest':'empty',
+        'sec-fetch-mode':'cors',
+        'sec-fetch-site':'same-origin',
+        'user-agent':'Chrome/83.0.4103.106'
+        }
+    payload_b = {'partner_id':"43862540-ccbf-458f-837e-be5c757492ed"}
+    
+    response = session.post(URL_b, headers=headers_b, json = payload_b)
+    tree = fromstring(response.text)
+    SYSMSG = (response.text)[0:15]
+    print(SYSMSG)
+    if response.text.find('token') != -1:
+        SYSMSG =('SYSMSG - Successful login!')
+        complete = 1
+        break       
+    else:
+        SYSMSG =('SYSMSG - Unsuccessful Login - restart with the login stuff')
+        print(SYSMSG)
+        raise Exception('Login Failed')
+
+bearer = response.content.decode('utf-8')
+
+bearer = bearer[10: len(bearer)-2]
+bearer = 'Bearer '+bearer
+
+#print(bearer)   
+
+#Importing the CSV file from which Ride_ids will be taken out for Scraping
+    
+#Sorting the Imported Rides table so that its latest on top
+df_rides = df_rides.sort_values('started_at',ascending=False)
+#Dropping all the observations for which ride hasnt finished 
+df_rides = df_rides[pd.notnull(df_rides['completed_at'])]
+
+#Number of Ride Locations to scrape every half an hour
+ScrapeNumRides = 600
+Ride_IDS_Import = df_rides.iloc[:ScrapeNumRides]
+
+#Counting Number of Rides in the file and starting the loop for scraping
+numRides = len(Ride_IDS_Import.index)
+
+#Creating a Dataframe so that its Appended to it at the end
+AllRide_Locations = pd.DataFrame(columns=['Scrape_ID','Ride_ID','lat_1','lng_1','lat_2','lng_2',
+                                          'lat_3','lng_3','lat_4','lng_4','lat_5','lng_5',
+                                          'lat_6','lng_6','lat_7','lng_7','lat_8','lng_8',
+                                          'lat_9','lng_9','lat_10','lng_10','lat_11','lng_11',
+                                          'lat_12','lng_12','lat_13','lng_13','lat_14','lng_14',
+                                          'lat_15','lng_15','lat_16','lng_16','lat_17','lng_17',
+                                          'lat_18','lng_18','lat_19','lng_19','lat_20','lng_20'])
+
+    
+SYSMSG =('SYSMSG - Ready To Scrape...')
+print(SYSMSG)
+
+for i in range (0, numRides):
+#for i in range (0, 1):
+    Ride_ID = Ride_IDS_Import.iloc[i]['ride_id']
+
+    #Ride_ID = '----------------'
+    
+    print('Scrape_ID',i)
+    
+    url = "https://----------------/getRideById"
+    
+    headers = {
+        'authority':'----------------.co',
+        'method':'POST',
+        'path':'/----------------/getRideById',
+        'scheme':'https',
+        'accept':'application/json, text/plain, */*',
+        'accept-encoding':'gzip, deflate, br',
+        'accept-language':'en-US,en;q=0.9',
+        'authorization': bearer,    
+        'content-length':'88',
+        'content-type':'application/json',
+        'Cookie':cookies,
+        'content-type':'application/json',
+        'origin':'https://----------------.co',
+        'referer':f"https://----------------/{Ride_ID}",
+        'sec-fetch-dest':'empty',
+        'sec-fetch-mode':'cors',
+        'sec-fetch-site':'same-origin',
+        'user-agent':'Chrome/84.0.4147.125'
+        }
+    
+    #body = {"offset":str(i),
+     #           'limit': lim,
+     #           'order':'started_at-desc'}
+    
+    #body: {search: "", offset: 0, limit: 50, ratings: [], has_issues: null, order: null}
+    
+    #Assigning Ride Id as the PayLad
+    payload = {'ride_id': f"{Ride_ID}"}
+    
+    print('starting Scraping')
+    #Parsing the text from "tracks" and creating a dataframe
+    response_rides_loc = session.post(url, headers=headers, json = payload)
+    resp_text_rides_loc = json.loads(response_rides_loc.text)
+    df_rides_locations = pd.DataFrame(resp_text_rides_loc.get("tracks"))
+    
+    #Beginning the Data Frame Fixes - We Group by Locations to make the data Smaller, as they are duplicated.
+    #Creating New Variable as the imported variable is a Dictionary
+    if df_rides_locations.empty:
+        print(Ride_ID,'No Data')
+        NowTime = time.time() - start_time
+        print(NowTime/60, "Minutes Have Gone")
+        pass
+    else:
+        df_rides_locations['Locations'] = df_rides_locations['location'].astype(str)
+        #Grouping
+        df_rides_locGrouped = pd.DataFrame(df_rides_locations[['Locations']].groupby('Locations',observed=False,sort=False))
+        #Leaving Only the first variable
+        df_rides_locGrouped = df_rides_locGrouped[[0]]
+        #Creating other variables and dropping the initial Vaiable
+        df_rides_locGrouped['Ride_ID'] = f"{Ride_ID}"
+        #Splitting the locations String into lat and lng vaiables adjusting necessary things
+        df_rides_locGrouped[['lat','lng']] = df_rides_locGrouped[0].str.split(',', n = 1, expand = True)
+        df_rides_locGrouped['lat'] = df_rides_locGrouped['lat'].str.replace("{'lat': ",'').str.strip().astype(float)
+        
+        df_rides_locGrouped['lng'] = df_rides_locGrouped['lng'].str.replace("'lng': ",'')
+        df_rides_locGrouped['lng'] = df_rides_locGrouped['lng'].str.replace("}",'').str.strip().astype(float)
+        
+        df_rides_locGrouped['Scrape_ID'] = i
+        
+        #Final DataFrame per Ride
+        df_rides_locGrouped = df_rides_locGrouped[['Scrape_ID','Ride_ID','lat','lng']]
+        #df_rides_locGrouped[['Ride_ID','lat','lng']].head()
+        
+        print(i,Ride_ID,"finished")
+        NowTime = time.time() - start_time
+        print(NowTime/60, "Minutes Have Gone")
+            
+        #numLocations
+        numLocations = len(df_rides_locGrouped.index)
+        
+        #Number With Which To Divide
+        numDifferences = (numLocations)/19
+        
+        #Creating Final Data
+        Horizontal_Locations = pd.DataFrame(columns=['Scrape_ID','Ride_ID'])
+        
+        Horizontal_Locations = Horizontal_Locations.append({'Scrape_ID': df_rides_locGrouped.iloc[0]['Scrape_ID'],
+                                      'Ride_ID': df_rides_locGrouped.iloc[0]['Ride_ID']
+                                      }, ignore_index = True)
+        
+        Horizontal_Locations
+        
+        df_rides_locGrouped.iloc[0]['lat']
+        
+        numNew = 0
+        
+        for s in range (0, 20):
+            if s == 0:
+                numIndex = math.floor(numNew)
+                #print(i,numNew,numIndex)
+                
+                Horizontal_Locations[f"lat_{s+1}"] = df_rides_locGrouped.iloc[numIndex]['lat']
+                Horizontal_Locations[f"lng_{s+1}"] = df_rides_locGrouped.iloc[numIndex]['lng']
+            
+            else:
+                numNew = numNew + numDifferences
+                numIndex = math.floor(numNew)
+                #print(i,numNew,numIndex)
+                
+                Horizontal_Locations[f"lat_{s+1}"] = df_rides_locGrouped.iloc[numIndex-1]['lat']
+                Horizontal_Locations[f"lng_{s+1}"] = df_rides_locGrouped.iloc[numIndex-1]['lng']
+            
+        AllRide_Locations = AllRide_Locations.append(Horizontal_Locations)
+        
+        print("Appended to Final Table - ",i)
+        
+AllRide_Locations['NEW_RIDES'] = 1
+
+SYSMSG =('SYSMSG - Scraping Has Completed!...')
+print(SYSMSG)
+
+con=engine.connect()    
+
+#Took everything out for testing
+AllRide_Locations.to_sql('TMP_NEW_RIDES_LOCATIONS', con = engine, if_exists = 'replace') 
+print(NowTime/60, "Minutes Have Gone - The Table Has been written to SQL Server")
+
+SYSMSG =('SYSMSG - NOW Transforming the Table')
+print(SYSMSG)
+executeScriptsFromFile('[G11]_MYSQL_-_RIDES_LOCATIONS_UPDATE.sql')
+
+SYSMSG =('SYSMSG - Transformed!')
+print(SYSMSG)
+
+SYSMSG =('SYSMSG - NOW Running Datamart UPDATE')
+print(SYSMSG)
+executeScriptsFromFile('[G06]_MYSQL_-_RIDES_DATAMART_UPDATE.sql')
+
+SYSMSG =('SYSMSG - RIDES DATAMART Updated!')
+print(SYSMSG)
+    
+SYSMSG =('SYSMSG - Rides Locations Script Completed!... We Rule')
+print(SYSMSG)
+  
+engine.dispose()
+
+# =============================================================================
+#     if AllRide_Locations.empty:
+#         print('We have No data on these Rides')
+#         pass
+#     else:
+# =============================================================================
+    
+# =============================================================================
+# except Exception:
+#     print('SYSMSG - Goodbye')
+#     engine.dispose()
+# 
+# =============================================================================
+
